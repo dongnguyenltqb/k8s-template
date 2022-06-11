@@ -1,0 +1,172 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: haproxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: haproxy
+  namespace: haproxy
+spec:
+  type: NodePort
+  selector:
+    app: haproxy
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haproxy-deployment
+  namespace: haproxy
+  labels:
+    app: haproxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: haproxy
+  template:
+    metadata:
+      labels:
+        app: haproxy
+    spec:
+      volumes:
+        - name: haproxy-cfg-volume
+          configMap:
+            name: haproxy-cfg-v1.0.2
+      containers:
+        - name: haproxy
+          image: haproxy
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: haproxy-cfg-volume
+              mountPath: "/usr/local/etc/haproxy"
+              readOnly: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haproxy-cfg-v1.0.2
+  namespace: haproxy
+data:
+  haproxy.cfg: |
+    global
+      maxconn 8192
+        log stdout format raw daemon debug
+
+    defaults
+      log     global
+      mode    http
+      option  httplog
+      option  dontlognull
+        http-reuse aggressive
+      timeout connect 2s
+      timeout client 1m
+      timeout server 5s
+
+    frontend igw
+      bind *:80
+      mode http
+      stats enable
+      stats uri /admin
+      stats auth admin:admin
+      stats refresh 5s
+      default_backend BE_DEFAULT
+      option forwardfor
+      # add header to request
+      http-request set-header x-proxy-host "$HOSTNAME"
+      # set response header
+      http-after-response set-header x-powered-by "haproxy"
+
+      # ACL for source ip
+      acl SOURCE_HOME_NETWORK src 0.0.0.0/0
+      # ACL for path matching
+      acl PATH_STATIC path -i -m beg /static
+      acl PATH_GOOGLE_SITE_VERIFY path -i -m beg /google_site_verify
+      # Verify site
+      http-request return status 200 content-type "text/plain" string "hello" if PATH_GOOGLE_SITE_VERIFY
+      # Expose metrics for prometheus
+      http-request use-service prometheus-exporter if { path /metrics }  SOURCE_HOME_NETWORK
+      # Forward to static server
+      use_backend BE_STATIC if PATH_STATIC
+
+    backend BE_STATIC
+        mode http
+        option http-keep-alive
+        timeout http-keep-alive 10m
+        balance roundrobin
+        option httpchk
+        option redispatch
+        retries 3
+        retry-on all-retryable-errors
+        http-check send meth GET  uri /
+        cookie STATIC_SERVER insert indirect nocache dynamic
+        dynamic-cookie-key ha_secret_pharse
+        server static.svc.haproxy.cluster.local static.haproxy.svc.cluster.local:80 maxconn 10 check inter 3s  fall 1  rise 3 slowstart 1000
+
+    backend BE_DEFAULT
+        http-request set-log-level silent
+        http-request return status 200 content-type "text/html" string "Welcome to my API."
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: static
+  namespace: haproxy
+spec:
+  type: ExternalName
+  externalName: nginx.default.svc.cluster.local
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  type: NodePort
+  selector:
+    app: nginx
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
