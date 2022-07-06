@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: haproxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: haproxy-grpc
+  namespace: haproxy
+spec:
+  type: NodePort
+  selector:
+    app: haproxy-grpc
+  ports:
+    - name: api
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
+    - name: stats
+      protocol: TCP
+      port: 3001
+      targetPort: 3001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haproxy-deployment
+  namespace: haproxy
+  labels:
+    app: haproxy-grpc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: haproxy-grpc
+  template:
+    metadata:
+      labels:
+        app: haproxy-grpc
+    spec:
+      volumes:
+        - name: haproxy-cfg-volume
+          configMap:
+            name: haproxy-grpc-cfg-v0.0.9
+      containers:
+        - name: haproxy
+          image: haproxy
+          ports:
+            - containerPort: 3000
+            - containerPort: 3001
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: haproxy-cfg-volume
+              mountPath: "/usr/local/etc/haproxy"
+              readOnly: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haproxy-grpc-cfg-v0.0.9
+  namespace: haproxy
+data:
+  haproxy.cfg: |
+    global
+      maxconn 8192
+      ulimit-n 1000000
+      log stdout format raw daemon debug
+
+    defaults
+      log     global
+      mode    http
+      option  httplog
+      option  dontlognull
+      http-reuse aggressive
+      timeout connect 2s
+      timeout client 1m
+      timeout server 5s
+
+    frontend igw
+      bind *:3000 proto h2
+      mode http
+      default_backend GOLANG
+      option forwardfor
+
+    frontend stats
+      bind *:3001
+      mode http
+      stats enable
+      stats uri /
+      stats auth admin:admin
+      stats refresh 5s
+    default_backend DEFAULT
+
+    backend GOLANG
+      mode http
+      option http-keep-alive
+      timeout http-keep-alive 600m
+      balance roundrobin
+      retry-on all-retryable-errors
+      server-template grpc.haproxy.svc.cluster.local 1 grpc.haproxy.svc.cluster.local:4000 check proto h2
+
+    backend DEFAULT
+      http-request set-log-level silent
+      http-request return status 200 content-type "text/html" string "nothing here."
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc
+  namespace: haproxy
+spec:
+  clusterIP: None
+  selector:
+    app: grpc
+  ports:
+    - protocol: TCP
+      port: 4000
+      targetPort: 4000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpc-deployment
+  labels:
+    app: grpc
+  namespace: haproxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: grpc
+  template:
+    metadata:
+      labels:
+        app: grpc
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: grpc
+          image: image.spiritlabs.co/demogrpc:v0.0.1
+          ports:
+            - containerPort: 4000
+          env:
+            - name: PORT
+              value: "4000"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
