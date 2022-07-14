@@ -1,0 +1,92 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: auth
+  namespace: "default"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "5000m"
+spec:
+  rules:
+    - host: auth.dongnguyen.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: auth-svc
+                port:
+                  number: 4000
+  ingressClassName: nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-svc
+  namespace: "default"
+specs:
+  selector:
+    app: auth
+  ports:
+    - name: tcp4000
+      protocol: TCP
+      port: 4000
+      targetPort: 4000
+    - name: tcp900
+      protocol: TCP
+      port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-deployment
+  namespace: "default"
+  labels:
+    app: auth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+    spec:
+      nodeSelector:
+      # Name: ""
+      volumes:
+        - name: auth-env
+          configMap:
+            name: auth-config-map-v1
+            items:
+              - key: .env
+                path: .env
+      containers:
+        - name: auth
+          image: docker pull ealen/echo-server
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 4000
+              protocol: TCP
+            - containerPort: 9000
+              protocol: TCP
+          volumeMounts:
+            - name: auth-env
+              mountPath: "/app/.env"
+              subPath: ".env"
+              readOnly: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auth-config-map-v1
+  namespace: default
+data:
+  .env: |
+    PORT=4000
+    API_PREFIX=auth-apis
+    HOST=0.0.0.0
+---
+
